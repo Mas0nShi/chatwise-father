@@ -1,13 +1,13 @@
 [package]
 name = "chatwise-patcher"
-version = "0.1.0"
+version = "0.2.1"
 edition = "2021"
 
 [dependencies]
-object = "0.36"        # 用于解析 PE/Mach-O 文件
-memmap2 = "0.9"        # 用于内存映射文件
-brotli = "7.0"         # Brotli 压缩/解压缩
-glob = "0.3"           # 用于文件名匹配
-anyhow = "1.0"         # 错误处理
-clap = { version = "4.5", features = ["derive"] }  # 命令行参数解析
-regex = "1.11"         # 正则表达式支持
+object = "0.36"
+memmap2 = "0.9"
+brotli = "7.0"
+glob = "0.3"
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+regex = "1.11"

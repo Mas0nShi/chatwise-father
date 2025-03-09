@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use memmap2::Mmap;
 use object::{BinaryFormat, Object, ObjectSection, SectionKind};
@@ -99,10 +99,11 @@ impl BinaryPatcher {
                     size: s.size(),
                 })
                 .collect::<Vec<_>>(),
-            BinaryFormat::MachO => {
-                // fliter all sections with segment name,
-                // seg name is __TEXT or __DATA_CONST
-                // and section name is __const
+            BinaryFormat::MachO =>
+            // fliter all sections with segment name,
+            // seg name is __TEXT or __DATA_CONST
+            // and section name is __const
+            {
                 obj.sections()
                     .filter(|s| {
                         s.segment_name() == Ok(Some("__TEXT"))
@@ -116,7 +117,7 @@ impl BinaryPatcher {
                     })
                     .collect::<Vec<_>>()
             }
-            _ => unreachable!(),
+            _ => unimplemented!(),
         };
 
         Ok(Self {
@@ -127,84 +128,60 @@ impl BinaryPatcher {
     }
 
     fn convert_rva_to_file_offset(&self, rva: u64) -> Result<u64> {
-        // in mach-o, __TEXT,__const section inlcude assets content,
-        match self.binary_format {
-            BinaryFormat::MachO => {
-                // *Q: only need low 48 bits of the pointer
-                // *A: high 16 bits has another meaning in mach-o
-                return Ok(rva & 0xFFFFFFFFFFFF);
-            }
+        let offset = match self.binary_format {
+            BinaryFormat::MachO => rva & 0xFFFFFFFFFFFF,
             BinaryFormat::Pe => {
-                let Some(ref section) = self.sections.first() else {
-                    return Err(anyhow::anyhow!("RDATA section not found"));
-                };
-
-                // check if rva is in the target section
-                if rva >= section.virtual_address && rva < section.virtual_address + section.size {
-                    return Ok(rva - section.virtual_address + section.file_offset);
-                }
+                let section = self.sections.first().context(".rdata section not found")?;
+                rva - section.virtual_address + section.file_offset
             }
-            _ => unreachable!(),
-        }
+            other_format => unimplemented!("Unsupported binary format: {:?}", other_format),
+        };
 
-        Err(anyhow::anyhow!("RVA is not in rdata section"))
+        Ok(offset)
     }
 
     fn heuristic_search_assets(&self) -> Result<Vec<Asset>> {
-        // get start offset and scan length
         let (scan_start, scan_length) = match self.binary_format {
             BinaryFormat::Pe => {
-                let section = self.sections.first().expect("RDATA section not found");
+                // always in .rdata section
+                let section = self.sections.first().context("section not found")?;
                 (section.file_offset as usize, section.size as usize)
             }
             BinaryFormat::MachO => {
-                // search range always in __DATA_CONST,__const section
-                let section = self
-                    .sections
-                    .last()
-                    .expect("__DATA_CONST section not found");
+                // always in __DATA_CONST,__const section
+                let section = self.sections.last().context("section not found")?;
                 (section.file_offset as usize, section.size as usize)
             }
-            _ => panic!("Unsupported binary format"),
+            other_format => unimplemented!("Unsupported binary format: {:?}", other_format),
         };
 
-        let end_offset = scan_start.saturating_add(scan_length);
-        assert!(end_offset <= self.mmap.len(), "end_offset is out of range");
-
-        // println!("Scanning from offset 0x{:x} to 0x{:x}", start_offset, end_offset);
+        let scan_end = scan_start.saturating_add(scan_length);
+        assert!(scan_end <= self.mmap.len(), "scan end is out of range");
 
         let mut assets = Vec::new();
-        let mut offset = scan_start;
-        let mut scan_step = 8; // TODO: detect PE/Mach-O file format to determine pointer size
-        while offset + ASSET_HEADER_SIZE <= end_offset {
-            if let Ok(asset) = self.try_parse_asset_at(offset) {
-                // println!("Found asset at offset 0x{:x}: {}", offset, String::from_utf8_lossy(&asset.name));
+        let mut pos = scan_start;
+        let mut step = 8;
+        while pos + ASSET_HEADER_SIZE <= scan_end {
+            if let Ok(asset) = self.try_parse_asset_at(pos) {
                 assets.push(asset);
-                scan_step = ASSET_HEADER_SIZE;
+                step = ASSET_HEADER_SIZE;
             }
 
-            offset += scan_step;
+            pos += step;
         }
 
-        // println!("Scan completed");
         Ok(assets)
     }
 
     fn try_parse_asset_at(&self, offset: usize) -> Result<Asset> {
-        assert!(
-            offset + ASSET_HEADER_SIZE <= self.mmap.len(),
-            "offset is out of range"
-        );
-
         let chunk = &self.mmap[offset..offset + ASSET_HEADER_SIZE];
-
         let header = unsafe { &*(chunk.as_ptr() as *const AssetHeader) };
 
         let name_off = self.convert_rva_to_file_offset(header.name_ptr)?;
         let data_off = self.convert_rva_to_file_offset(header.data_ptr)?;
 
         if !self.validate_asset_pointers(name_off, header.name_len, data_off, header.data_size) {
-            return Err(anyhow::anyhow!("invalid asset pointers"));
+            return Err(anyhow!("invalid asset pointers"));
         }
 
         let name = self.extract_name(name_off as usize, header.name_len as usize)?;
@@ -260,7 +237,7 @@ impl BinaryPatcher {
         let name = self.mmap[offset..offset + len].to_vec();
         // validate name
         if !name.iter().all(|&b| b.is_ascii()) {
-            return Err(anyhow::anyhow!("invalid name"));
+            return Err(anyhow!("invalid name"));
         }
         Ok(name)
     }
@@ -278,27 +255,31 @@ impl BinaryPatcher {
             .collect::<Vec<_>>();
 
         if config_assets.len() != 1 {
-            return Err(anyhow::anyhow!(
-                "found {} config assets, expected 1",
+            return Err(anyhow!(
+                "not found or found more than 1 config asset, found: {}",
                 config_assets.len()
             ));
         }
 
         let asset = config_assets[0];
 
-        let new_data = self.process_asset_data(asset)?;
-
-        if new_data.len() > asset.data.len() {
-            return Err(anyhow::anyhow!("patched data is larger than original data"));
+        let compressed = self.process_asset_data(asset)?;
+        if compressed.len() > asset.data.len() {
+            return Err(anyhow!(
+                "patched data is larger than original data: {:#x} -> {:#x}",
+                asset.data.len(),
+                compressed.len()
+            ));
         }
 
         // replace data content
         let start_offset = asset.data_off as usize;
-        modified_data[start_offset..start_offset + new_data.len()].copy_from_slice(&new_data);
+        modified_data[start_offset..start_offset + compressed.len()].copy_from_slice(&compressed);
         // replace data size
         let data_size_offset = asset.data_size_off as usize;
         modified_data[data_size_offset..data_size_offset + 8]
-            .copy_from_slice(&(new_data.len() as u64).to_le_bytes());
+            .copy_from_slice(&(compressed.len() as u64).to_le_bytes());
+        // replace hash (rawhash -> newhash)
 
         println!("Patched asset: {}", String::from_utf8_lossy(&asset.name));
 
@@ -313,21 +294,16 @@ impl BinaryPatcher {
         let content = String::from_utf8_lossy(&decompressed);
 
         if !content.contains("chatwise.app") {
-            return Err(anyhow::anyhow!("content does not contain chatwise.app"));
+            return Err(anyhow!("content does not contain chatwise.app"));
         }
 
         let content = content.replace("chatwise.app", "cw.mas0n.org");
-
-        // shorten content (line 2 is source map url, ignore it)
-        let Some(content) = content.split("\n").next() else {
-            return Err(anyhow::anyhow!("failed to shorten content"));
-        };
-
-        // compress content
         let mut compressed = Vec::new();
         {
             let mut compressor =
-                brotli::CompressorWriter::new(&mut compressed, content.len(), 9, 22);
+                // !default quality in Tauri is 9, 
+                // !use 11 reduce compressed size after patch
+                brotli::CompressorWriter::new(&mut compressed, content.len(), 11, 22);
             compressor.write_all(content.as_bytes())?;
         }
 
@@ -347,24 +323,8 @@ fn main() -> Result<()> {
     println!("Scanning completed. Found {} assets", assets.len());
 
     if assets.is_empty() {
-        return Err(anyhow::anyhow!("No assets found"));
+        return Err(anyhow!("No assets found"));
     }
-
-    // for asset in &assets {
-    //     use std::path::Path;
-    //     println!("asset: {:?}", String::from_utf8_lossy(&asset.name));
-    //     // save asset to file
-    //     let file_name = format!("assets{}", String::from_utf8_lossy(&asset.name));
-    //     // ensure the directory exists
-    //     let dir = Path::new(&file_name).parent().unwrap();
-    //     fs::create_dir_all(dir)?;
-    //     let mut file = File::create(file_name)?;
-    //     // decompress data
-    //     let mut decompressor = brotli::Decompressor::new(asset.data.as_slice(), asset.data.len());
-    //     let mut decompressed = Vec::new();
-    //     decompressor.read_to_end(&mut decompressed)?;
-    //     file.write_all(&decompressed)?;
-    // }
 
     println!("Patching binary...");
     let modified_data = patcher.patch_config(assets)?;
