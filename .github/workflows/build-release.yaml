@@ -12,7 +12,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-13, macos-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
         arch: [x86_64, aarch64]
         include:
           - os: ubuntu-latest
@@ -20,7 +20,7 @@ jobs:
             target_suffix: unknown-linux-musl
           - os: windows-latest
             rust: nightly
-            target_suffix: pc-windows-gnu
+            target_suffix: pc-windows-msvc
           - os: macos-latest
             rust: nightly
             target_suffix: apple-darwin
