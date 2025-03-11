@@ -1,0 +1,74 @@
+name: Build Release
+on:
+  workflow_dispatch: {}
+  push:
+    branches: ['master']
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-13, macos-latest]
+        arch: [x86_64, aarch64]
+        include:
+          - os: ubuntu-latest
+            rust: nightly
+            target_suffix: -unknown-linux-musl
+          - os: windows-latest
+            rust: nightly
+            target_suffix: -pc-windows-gnu
+          - os: macos-latest
+            rust: nightly
+            target_suffix: -apple-darwin
+      fail-fast: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.rust }}
+          profile: minimal
+          override: true
+          target: ${{ matrix.arch }}-${{ matrix.target_suffix }}
+
+      - name: Build binary
+        run: cargo build --verbose --release --target ${{ matrix.arch }}-${{ matrix.target_suffix }}
+        env:
+          RUST_BACKTRACE: 1
+
+      - name: Strip binary (linux and macos)
+        if: matrix.os == 'ubuntu-latest' || matrix.os == 'macos-latest' || matrix.os == 'macos-13'
+        run: strip "target/${{ matrix.arch }}-${{ matrix.target_suffix }}/release/chatwise-father"
+
+      - name: Build archive
+        shell: bash
+        run: |
+          mkdir archive
+          cp LICENSE README.md archive/
+          cd archive
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            cp "../target/${{ matrix.arch }}-${{ matrix.target_suffix }}/release/chatwise-father.exe" ./
+            7z a "${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.target_suffix }}.zip" LICENSE README.md chatwise-father.exe
+          else
+            cp "../target/${{ matrix.arch }}-${{ matrix.target_suffix }}/release/chatwise-father" ./
+            zip -r "${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.target_suffix }}.zip" LICENSE README.md chatwise-father
+          fi
+      - name: Upload a Build Artifact
+        uses: actions/upload-artifact@v4.3.6
+        with:
+          name: ${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.target_suffix }}.zip
+          path: archive/${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.target_suffix }}.zip
+      
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            archive/${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.target_suffix }}.zip
