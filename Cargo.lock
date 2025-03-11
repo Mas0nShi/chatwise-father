@@ -116,8 +116,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 
 [[package]]
-name = "chatwise-patcher"
-version = "0.2.1"
+name = "chatwise-father"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "brotli",

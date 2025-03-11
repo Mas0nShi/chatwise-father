@@ -1,0 +1,68 @@
+name: Build Release
+on:
+  push:
+    tags:
+      - 'v*'
+permissions:
+  contents: write
+jobs:
+  build:
+    name: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+        arch: [x86_64, aarch64]
+        rust: [nightly]
+        include:
+          - os: windows-latest
+            target_suffix: pc-windows-msvc
+          - os: macos-latest
+            target_suffix: apple-darwin
+      fail-fast: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.rust }}
+          profile: minimal
+          override: true
+          target: ${{ matrix.arch }}-${{ matrix.target_suffix }}
+
+      - name: Build binary
+        run: cargo build --verbose --release --target ${{ matrix.arch }}-${{ matrix.target_suffix }}
+        env:
+          RUST_BACKTRACE: 1
+
+      - name: Strip binary (macos)
+        if: matrix.os == 'macos-latest'
+        run: strip "target/${{ matrix.arch }}-${{ matrix.target_suffix }}/release/chatwise-father"
+
+      - name: Build archive
+        shell: bash
+        run: |
+          mkdir archive
+          cd archive
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            cp "../target/${{ matrix.arch }}-${{ matrix.target_suffix }}/release/chatwise-father.exe" ./
+            7z a "chatwise-father-${{ matrix.arch }}-${{ matrix.target_suffix }}.zip" chatwise-father.exe
+          else
+            cp "../target/${{ matrix.arch }}-${{ matrix.target_suffix }}/release/chatwise-father" ./
+            zip -r "chatwise-father-${{ matrix.arch }}-${{ matrix.target_suffix }}.zip" chatwise-father
+          fi
+      - name: Upload a Build Artifact
+        uses: actions/upload-artifact@v4.3.6
+        with:
+          name: chatwise-father-${{ matrix.arch }}-${{ matrix.target_suffix }}.zip
+          path: archive/chatwise-father-${{ matrix.arch }}-${{ matrix.target_suffix }}.zip
+      
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            archive/chatwise-father-${{ matrix.arch }}-${{ matrix.target_suffix }}.zip
