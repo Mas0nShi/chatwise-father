@@ -17,13 +17,13 @@ jobs:
         include:
           - os: ubuntu-latest
             rust: nightly
-            target_suffix: -unknown-linux-musl
+            target_suffix: unknown-linux-musl
           - os: windows-latest
             rust: nightly
-            target_suffix: -pc-windows-gnu
+            target_suffix: pc-windows-gnu
           - os: macos-latest
             rust: nightly
-            target_suffix: -apple-darwin
+            target_suffix: apple-darwin
       fail-fast: false
 
     steps:
