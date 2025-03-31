@@ -66,7 +66,7 @@ struct Args {
     input: String,
 
     #[arg(short, long)]
-    output: String,
+    output: Option<String>,
 }
 
 struct BinaryPatcher {
@@ -279,7 +279,7 @@ impl BinaryPatcher {
         let data_size_offset = asset.data_size_off as usize;
         modified_data[data_size_offset..data_size_offset + 8]
             .copy_from_slice(&(compressed.len() as u64).to_le_bytes());
-        
+
         println!("Patched asset: {}", String::from_utf8_lossy(&asset.name));
 
         Ok(modified_data)
@@ -292,11 +292,14 @@ impl BinaryPatcher {
         // replace content
         let content = String::from_utf8_lossy(&decompressed);
 
-        if !content.contains("chatwise.app") {
+        if !content.contains("https://chatwise.app") {
             return Err(anyhow!("content does not contain chatwise.app"));
         }
 
-        let content = content.replace("chatwise.app", "chatwise-father.fishilir.workers.dev");
+        let content = content.replace(
+            "https://chatwise.app",
+            "https://chatwise-father.fishilir.workers.dev",
+        );
         let mut compressed = Vec::new();
         {
             let mut compressor =
@@ -327,11 +330,16 @@ fn main() -> Result<()> {
 
     println!("Patching binary...");
     let modified_data = patcher.patch_config(assets)?;
-    fs::write(&args.output, modified_data)?;
-    println!("Patching completed. Output file: {}", args.output);
+
+    if let Some(ref output) = args.output {
+        fs::write(output, modified_data)?;
+        println!("Patching completed. Output file: {}", output);
+    } else {
+        todo!();
+    }
+
     // first install need open browser visit chatwise://login-success?token=[Your Token] to login
     println!("Please open the browser and visit chatwise://login-success?token=[Your Token] to complete hacker login");
-
 
     Ok(())
 }
