@@ -18,10 +18,13 @@ cargo build --release
 ## Usage
 
 ```bash
+# 1. replace automatically
+./chatwise-father
+# 2. manually
 ./chatwise-father -i <input_file> -o <output_file>
 ```
 
-### macOS
+### macOS manually
 
 ```bash
 chatwise-father -i /Applications/ChatWise.app/Contents/MacOS/chatwise -o /tmp/chatwise
@@ -32,7 +35,7 @@ sudo codesign --force --deep --sign - /Applications/ChatWise.app/Contents/MacOS/
 open "chatwise://login-success?token=[REDACTED_TOKEN]"
 ```
 
-### Windows
+### Windows manually
 
 ```powershell
 chatwise-father -i %USERPROFILE%\AppData\Local\ChatWise\chatwise.exe -o %TEMP%\chatwise.exe
