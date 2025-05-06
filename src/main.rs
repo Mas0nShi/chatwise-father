@@ -286,13 +286,19 @@ impl BinaryPatcher {
         let mut modified_data = self.mmap.to_vec();
 
         for rule in rules {
-            let matched = self.find_matching_asset(&assets, &rule)?;
-            self.apply_patch(&mut modified_data, &matched, &rule)?;
-            println!(
-                "Applied patch '{}' to asset: {}",
-                rule.name,
-                String::from_utf8_lossy(&matched.name)
-            );
+            match self.find_matching_asset(&assets, &rule) {
+                Ok(matched) => {
+                    self.apply_patch(&mut modified_data, &matched, &rule)?;
+                println!(
+                    "Applied patch '{}' to asset: {}",
+                    rule.name,
+                    String::from_utf8_lossy(&matched.name)
+                );
+                },
+                Err(err) => {
+                    println!("Skip: {}", err);
+                }
+            }
         }
 
         Ok(modified_data)
@@ -395,7 +401,7 @@ fn main() -> Result<()> {
 
     let rules = vec![
         PatchRule {
-            name: "API endpoint".to_string(),
+            name: "API endpoint (<v0.8.47)".to_string(),
             pattern: Regex::new(r#"="https://chatwise.app"[;,]"#)?,
             processor: Box::new(|content| {
                 Ok(content.replace(
@@ -404,6 +410,17 @@ fn main() -> Result<()> {
                 ))
             }),
         },
+        PatchRule {
+            name: "API endpoint (>=v0.8.47)".to_string(),
+            pattern: Regex::new(r#"https://chatwise.app/api/user"#)?,
+            processor: Box::new(|content| {
+                Ok(content.replace(
+                    "https://chatwise.app/api/user",
+                    "https://chatwise-father.fishilir.workers.dev/api/user",
+                ))
+            }),
+        }
+
         // PatchRule {
         //     name: "Update Logic".to_string(),
         //     pattern: Regex::new(r#"this.downloadedBytes=void 0"#)?,
