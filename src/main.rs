@@ -7,6 +7,9 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::process::Command;
 
+mod config;
+use config::Config;
+
 const ASSET_HEADER_SIZE: usize = size_of::<AssetHeader>();
 
 #[repr(C)]
@@ -364,6 +367,32 @@ impl BinaryPatcher {
     }
 }
 
+/// Create patch rules using the provided configuration
+fn create_patch_rules() -> Result<Vec<PatchRule>> {
+    Ok(vec![
+        PatchRule {
+            name: "API endpoint (<v0.8.47)".to_string(),
+            pattern: Regex::new(r#"="https://chatwise.app"[;,]"#)?,
+            processor: Box::new(|content| {
+                Ok(content.replace(
+                    Config::ORIGINAL_BASE_URL,
+                    Config::REPLACEMENT_BASE_URL,
+                ))
+            }),
+        },
+        PatchRule {
+            name: "API endpoint (>=v0.8.47)".to_string(),
+            pattern: Regex::new(r#"https://chatwise.app/api/user"#)?,
+            processor: Box::new(|content| {
+                Ok(content.replace(
+                    Config::ORIGINAL_USER_API_ENDPOINT,
+                    Config::REPLACEMENT_USER_API_ENDPOINT,
+                ))
+            }),
+        },
+    ])
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -399,27 +428,8 @@ fn main() -> Result<()> {
     // println!("Patching binary...");
     // let modified_data = patcher.patch_config(assets)?;
 
-    let rules = vec![
-        PatchRule {
-            name: "API endpoint (<v0.8.47)".to_string(),
-            pattern: Regex::new(r#"="https://chatwise.app"[;,]"#)?,
-            processor: Box::new(|content| {
-                Ok(content.replace(
-                    "https://chatwise.app",
-                    "https://chatwise-father.fishilir.workers.dev",
-                ))
-            }),
-        },
-        PatchRule {
-            name: "API endpoint (>=v0.8.47)".to_string(),
-            pattern: Regex::new(r#"https://chatwise.app/api/user"#)?,
-            processor: Box::new(|content| {
-                Ok(content.replace(
-                    "https://chatwise.app/api/user",
-                    "https://chatwise-father.fishilir.workers.dev/api/user",
-                ))
-            }),
-        }
+    println!("Using API base URL: {}", Config::REPLACEMENT_BASE_URL);
+    let rules = create_patch_rules()?;
 
         // PatchRule {
         //     name: "Update Logic".to_string(),
@@ -457,7 +467,6 @@ fn main() -> Result<()> {
         //         })
         //     }),
         // },
-    ];
 
     println!("Applying patches...");
     let modified_data = patcher.patch(assets, rules)?;
